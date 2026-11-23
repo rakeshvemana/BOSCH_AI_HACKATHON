@@ -1,0 +1,13 @@
+{
+  "name": "javascript-sample",
+  "version": "1.0.0",
+  "description": "Small controlled fixture for Software Supply Chain Guardian",
+  "private": true,
+  "dependencies": {
+    "express": "4.18.2",
+    "lodash": "^4.17.21"
+  },
+  "devDependencies": {
+    "mocha": "^10.2.0"
+  }
+}
