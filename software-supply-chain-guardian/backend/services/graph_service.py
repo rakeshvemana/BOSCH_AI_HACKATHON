@@ -113,7 +113,8 @@ def subgraph_around(graph: dict[str, Any], node_id: str, depth: int = 3) -> dict
     }
 
 
-def _layout(graph: dict[str, Any]) -> dict[str, tuple[float, float]]:
+def _layers(graph: dict[str, Any]) -> dict[int, list[str]]:
+    """Group node ids by BFS depth from the root (unreachable nodes go in one extra layer)."""
     ids = [n["id"] for n in graph["nodes"]]
     adj: dict[str, list[str]] = {i: [] for i in ids}
     for e in graph["edges"]:
@@ -129,23 +130,42 @@ def _layout(graph: dict[str, Any]) -> dict[str, tuple[float, float]]:
     layers: dict[int, list[str]] = {}
     for i in ids:
         layers.setdefault(depth.get(i, max(depth.values(), default=0) + 1), []).append(i)
-    pos: dict[str, tuple[float, float]] = {}
+    return layers
+
+
+def _layout(graph: dict[str, Any]) -> dict[str, tuple[float, float]]:
+    """Left-to-right layered layout: x = depth column, nodes stacked vertically in each column.
+
+    Stacking vertically (instead of one long row per depth) gives every label its own line,
+    so wide layers (e.g. 50+ transitive packages) stay readable.
+    """
+    layers = _layers(graph)
     parents: dict[str, list[str]] = {}
     for e in graph["edges"]:
         parents.setdefault(e["target"], []).append(e["source"])
+    pos: dict[str, tuple[float, float]] = {}
     for d in sorted(layers):
         layer = layers[d]
         if d == 0:
             layer.sort()
-        else:  # barycentre ordering reduces crossing lines
-            layer.sort(key=lambda n: (sum(pos[p][0] for p in parents.get(n, []) if p in pos) / max(1, sum(1 for p in parents.get(n, []) if p in pos)), n))
-        width = max(len(layer) - 1, 1)
+        else:  # barycentre ordering (mean parent row) reduces crossing lines
+            def key(n: str) -> tuple[float, str]:
+                ys = [pos[p][1] for p in parents.get(n, []) if p in pos]
+                return (-(sum(ys) / len(ys)) if ys else 0.0, n)
+            layer.sort(key=key)
+        half = (len(layer) - 1) / 2
         for idx, n in enumerate(layer):
-            pos[n] = ((idx - width / 2) if len(layer) > 1 else 0.0, -float(d))
+            pos[n] = (float(d), half - idx)
     return pos
 
 
 _COLORS = {"root": "#111827", "direct": "#2563eb", "transitive": "#0d9488", "unknown": "#d97706"}
+_ROW_PX = 22  # vertical pixels per node in the tallest column
+
+
+def _short(name: str, n: int = 26) -> str:
+    name = name.split("/")[-1]
+    return name if len(name) <= n else name[: n - 1] + "…"
 
 
 def build_figure(graph: dict[str, Any], highlight: Optional[str] = None):
@@ -153,28 +173,52 @@ def build_figure(graph: dict[str, Any], highlight: Optional[str] = None):
     import plotly.graph_objects as go
 
     pos = _layout(graph)
-    xs: list[Optional[float]] = []
-    ys: list[Optional[float]] = []
-    for e in graph["edges"]:
-        if e["source"] in pos and e["target"] in pos:
-            xs += [pos[e["source"]][0], pos[e["target"]][0], None]
-            ys += [pos[e["source"]][1], pos[e["target"]][1], None]
-    edge_trace = go.Scatter(x=xs, y=ys, mode="lines", line=dict(width=1, color="#9ca3af"), hoverinfo="none", showlegend=False)
+    layers = _layers(graph)
+    tallest = max((len(v) for v in layers.values()), default=1)
+    columns = max(layers, default=0)
 
-    fig = go.Figure(edge_trace)
+    def edge_trace(edges: list[dict], color: str, width: float):
+        xs: list[Optional[float]] = []
+        ys: list[Optional[float]] = []
+        for e in edges:
+            if e["source"] in pos and e["target"] in pos:
+                (x0, y0), (x1, y1) = pos[e["source"]], pos[e["target"]]
+                # cubic Bezier S-curve (horizontal tangents at both ends): lines fan out instead of
+                # merging into a block, and never overshoot the way a Plotly spline does
+                xm = (x0 + x1) / 2
+                for i in range(13):
+                    t = i / 12
+                    a, b, c, d = (1 - t) ** 3, 3 * (1 - t) ** 2 * t, 3 * (1 - t) * t ** 2, t ** 3
+                    xs.append(a * x0 + b * xm + c * xm + d * x1)
+                    ys.append(a * y0 + b * y0 + c * y1 + d * y1)
+                xs.append(None)
+                ys.append(None)
+        return go.Scatter(x=xs, y=ys, mode="lines", line=dict(width=width, color=color),
+                          hoverinfo="none", showlegend=False)
+
+    touching = [e for e in graph["edges"] if highlight in (e["source"], e["target"])] if highlight else []
+    other = [e for e in graph["edges"] if e not in touching]
+    fig = go.Figure(edge_trace(other, "rgba(156,163,175,0.3)" if highlight else "rgba(156,163,175,0.55)", 0.8))
+    if touching:
+        fig.add_trace(edge_trace(touching, "#ef4444", 2))
+
+    near = ({highlight} | {e["source"] for e in touching} | {e["target"] for e in touching}) if highlight else set()
+    lit = lambda n: not highlight or n["id"] in near  # noqa: E731
     by_type: dict[str, list[dict]] = {}
     for n in graph["nodes"]:
         by_type.setdefault(n["dependency_type"], []).append(n)
     for dtype, nodes in by_type.items():
         fig.add_trace(go.Scatter(
             x=[pos[n["id"]][0] for n in nodes], y=[pos[n["id"]][1] for n in nodes], mode="markers+text",
-            name=dtype.capitalize(), textposition="bottom center",
-            text=[(n["name"].split("/")[-1][:18] + (f"<br>{n['version']}" if n["version"] and len(graph["nodes"]) <= 60 else ""))
+            name=dtype.capitalize(), textposition="middle right",
+            text=[f" {_short(n['name'])}" + (f" <span style='color:#9ca3af'>{n['version']}</span>" if n["version"] else "")
                   for n in nodes],
-            textfont=dict(size=9),
+            textfont=dict(size=11, color=["#111827" if lit(n) else "#d1d5db" for n in nodes]),
             marker=dict(
-                size=[22 if n["id"] == highlight else 14 for n in nodes], color=_COLORS.get(dtype, "#6b7280"),
-                line=dict(width=[3 if n["id"] == highlight else 1 for n in nodes], color="#ef4444" if highlight else "#ffffff"),
+                size=[16 if n["id"] == highlight else 10 for n in nodes], color=_COLORS.get(dtype, "#6b7280"),
+                opacity=[1.0 if lit(n) else 0.3 for n in nodes],
+                line=dict(width=[3 if n["id"] == highlight else 1 for n in nodes],
+                          color=["#ef4444" if n["id"] == highlight else "#ffffff" for n in nodes]),
                 symbol=["diamond" if n.get("in_cycle") else "circle" for n in nodes],
             ),
             customdata=[n["id"] for n in nodes],
@@ -182,9 +226,15 @@ def build_figure(graph: dict[str, Any], highlight: Optional[str] = None):
                        f"Type: {n['dependency_type']}<br>Ecosystem: {n['ecosystem']}<br>Depth: {n.get('depth')}" for n in nodes],
             hoverinfo="text",
         ))
+    half = (tallest - 1) / 2
+    titles = ["Application", "Direct"] + [f"Transitive (depth {i})" for i in range(2, columns + 1)]
     fig.update_layout(
-        showlegend=True, hovermode="closest", margin=dict(l=10, r=10, t=10, b=10), height=560,
-        xaxis=dict(visible=False), yaxis=dict(visible=False), plot_bgcolor="rgba(0,0,0,0)",
-        legend=dict(orientation="h", y=1.05),
+        showlegend=True, hovermode="closest", margin=dict(l=10, r=10, t=40, b=10),
+        height=max(420, 100 + _ROW_PX * tallest),
+        xaxis=dict(visible=False, range=[-0.1, columns + 0.9]),
+        yaxis=dict(visible=False, range=[-half - 1, half + 1.5]),
+        plot_bgcolor="rgba(0,0,0,0)", legend=dict(orientation="h", y=1.0, yanchor="bottom", x=0, xanchor="left"),
+        annotations=[dict(x=d, y=half + 1.2, text=f"<b>{t}</b>", showarrow=False, font=dict(size=12, color="#6b7280"),
+                          xanchor="left") for d, t in enumerate(titles[: columns + 1])],
     )
     return fig

@@ -209,8 +209,9 @@ if len(shown["nodes"]) > TABLE_FALLBACK_NODES:
     } for e in graph["edges"]]), width="stretch", hide_index=True, height=420)
 else:
     st.plotly_chart(build_figure(shown, highlight=selected or None), width="stretch")
-    st.caption("Blue = direct · teal = transitive · amber = unknown classification · diamond = part of a dependency cycle. "
-               "Hover a node for details.")
+    st.caption("Read left to right: your app → its direct dependencies → what those pull in. "
+               "Blue = direct · teal = transitive · amber = unknown classification · diamond = part of a dependency cycle. "
+               "Pick a component above to highlight its links in red. Hover a node for details.")
 
 if selected:
     n = names[selected]
