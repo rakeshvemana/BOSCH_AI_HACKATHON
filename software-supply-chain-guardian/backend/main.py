@@ -14,9 +14,9 @@ from fastapi.responses import JSONResponse
 
 from backend.config import settings
 from backend.models import (
-    AppInfo, DiscoveryResult, GraphResponse, HealthResponse, ImageRequest, RepositoryRequest,
+    AppInfo, DiscoveryResult, Finding, GraphResponse, HealthResponse, ImageRequest, RepositoryRequest,
 )
-from backend.services import discovery_service, sbom_service
+from backend.services import discovery_service, risk_service, sbom_service
 from backend.services.graph_service import graph_response
 from backend.services.repository_service import RepositoryService
 from backend.services.storage_service import AnalysisStore
@@ -27,7 +27,8 @@ log = logging.getLogger("ssc-guardian")
 
 def create_app(store: Optional[AnalysisStore] = None, repo_service: Optional[RepositoryService] = None) -> FastAPI:
     app = FastAPI(title=settings.app_name, version=settings.app_version,
-                  description="Stage 1: discover the software supply chain (dependencies, graph, SBOM).")
+                  description="Day 1: discover the software supply chain (dependencies, graph, SBOM), detect known "
+                              "vulnerabilities and suspicious changes, and present the evidence.")
     app.state.store = store or AnalysisStore()
     app.state.repo_service = repo_service or RepositoryService()
 
@@ -81,14 +82,22 @@ def create_app(store: Optional[AnalysisStore] = None, repo_service: Optional[Rep
                 raise FileValidationError(f"File too large (limit {limit // (1024 * 1024)} MB).", 413)
             uploads[f.filename or ""] = data
         result, sbom = await run_in_threadpool(discovery_service.discover_uploads, uploads)
-        _store().save(result, sbom)
+        await run_in_threadpool(_save, result, sbom)
         return result
+
+    def _save(result: DiscoveryResult, sbom) -> None:
+        """Compare with the previous analysis of the same source ('what changed'), then store."""
+        previous = _store().previous(result)
+        if previous is not None:
+            result.changes, change_findings = risk_service.compare(previous, result)
+            risk_service.finalize(result, [*result.findings, *change_findings])
+        _store().save(result, sbom)
 
     @app.post("/api/discover/repository", response_model=DiscoveryResult)
     def discover_repository(req: RepositoryRequest):
         repo_files = app.state.repo_service.fetch_files(req.url)
         result, sbom = discovery_service.discover_repository(repo_files)
-        _store().save(result, sbom)
+        _save(result, sbom)
         return result
 
     @app.post("/api/discover/image", response_model=DiscoveryResult)
@@ -98,12 +107,17 @@ def create_app(store: Optional[AnalysisStore] = None, repo_service: Optional[Rep
             raise FileValidationError("Image scanning needs explicit approval (approve=true).", 400)
         doc = sbom_service.run_syft(req.image)
         result, sbom = discovery_service.discover_image(doc, req.image)
-        _store().save(result, sbom)
+        _save(result, sbom)
         return result
 
     @app.get("/api/discovery/{analysis_id}", response_model=DiscoveryResult)
     def get_discovery(analysis_id: str):
         return _load(analysis_id)
+
+    @app.get("/api/discovery/{analysis_id}/findings", response_model=list[Finding])
+    def get_findings(analysis_id: str):
+        """Vulnerabilities and suspicious signals, highest initial risk first, each with its evidence."""
+        return _load(analysis_id).findings
 
     @app.get("/api/discovery/{analysis_id}/graph", response_model=GraphResponse)
     def get_graph(analysis_id: str):

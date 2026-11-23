@@ -29,6 +29,7 @@ ECOSYSTEM_LABELS = {
     "npm": "JavaScript (npm)",
     "maven": "Java (Maven)",
     "docker": "Container image",
+    "github-actions": "GitHub Actions (CI/CD)",
     "os-package": "OS package",
     "other": "Other",
 }
@@ -111,6 +112,73 @@ class DockerMetadata(BaseModel):
     analysis_kind: str = "Dockerfile metadata analysis (static text; no image was built or scanned)"
 
 
+Severity = Literal["critical", "high", "medium", "low", "info"]
+SEVERITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+
+
+class Evidence(BaseModel):
+    """One concrete, checkable fact behind a finding (a file line, a lockfile entry, an advisory)."""
+    source: str          # file path, "OSV.dev", "previous analysis", ...
+    detail: str
+    line: Optional[int] = None
+
+
+class Finding(BaseModel):
+    """Something that appears risky: a known vulnerability or a suspicious supply-chain signal."""
+    id: str
+    category: Literal["vulnerability", "suspicious"]
+    rule: str            # machine id, e.g. known-vulnerability, typosquatting, unpinned-action
+    title: str
+    description: str = ""
+    severity: Severity   # how bad the issue is on its own
+    risk: Severity       # initial risk level for THIS project (severity adjusted by context)
+    risk_rationale: str = ""
+    component_id: Optional[str] = None
+    component_name: Optional[str] = None
+    component_version: Optional[str] = None
+    ecosystem: Optional[str] = None
+    dependency_type: Optional[str] = None
+    paths: list[list[str]] = Field(default_factory=list)   # dependency paths, app -> ... -> component
+    evidence: list[Evidence] = Field(default_factory=list)
+    vulnerability_ids: list[str] = Field(default_factory=list)  # CVE / GHSA / PYSEC ...
+    cvss_score: Optional[float] = None
+    cvss_vector: Optional[str] = None
+    fixed_versions: list[str] = Field(default_factory=list)
+    references: list[str] = Field(default_factory=list)
+
+
+class RiskSummary(BaseModel):
+    total_findings: int = 0
+    by_risk: dict[str, int] = Field(default_factory=lambda: {k: 0 for k in SEVERITY_ORDER})
+    vulnerabilities: int = 0
+    vulnerable_components: int = 0
+    suspicious_signals: int = 0
+    vulnerability_scan: str = "not run"
+    components_checked: int = 0
+    components_not_checked: int = 0  # unresolved version or ecosystem without an advisory database
+
+
+class ComponentChange(BaseModel):
+    name: str
+    ecosystem: str
+    change: Literal["added", "removed", "upgraded", "downgraded", "changed"]
+    old_versions: list[str] = Field(default_factory=list)
+    new_versions: list[str] = Field(default_factory=list)
+    dependency_type: Optional[str] = None
+
+
+class ChangeReport(BaseModel):
+    """Difference against the previous analysis of the same source."""
+    previous_analysis_id: str
+    previous_created_at: datetime
+    added: int = 0
+    removed: int = 0
+    upgraded: int = 0
+    downgraded: int = 0
+    changed: int = 0
+    changes: list[ComponentChange] = Field(default_factory=list)
+
+
 class DiscoverySummary(BaseModel):
     project_name: str
     primary_ecosystem: Optional[str] = None
@@ -138,6 +206,9 @@ class DiscoveryResult(BaseModel):
     limitations: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     sbom_status: str = "not generated"
+    findings: list[Finding] = Field(default_factory=list)
+    risk: RiskSummary = Field(default_factory=RiskSummary)
+    changes: Optional[ChangeReport] = None
 
 
 # ---------------------------------------------------------------- API models

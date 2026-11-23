@@ -10,6 +10,9 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 SAMPLES = ROOT / "sample-projects"
 
+# Offline by default: the OSV.dev vulnerability lookup is replaced by fakes in the tests that need it.
+os.environ.setdefault("SSC_VULN_SCAN", "false")
+
 
 def pytest_addoption(parser):
     parser.addoption("--run-e2e", action="store_true", default=False, help="run live network end-to-end tests")

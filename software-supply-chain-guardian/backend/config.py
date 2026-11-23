@@ -17,7 +17,7 @@ def _int(name: str, default: int) -> int:
 class Settings:
     app_name = "Software Supply Chain Guardian"
     app_version = "0.1.0"
-    stage = "Stage 1 - Software Supply Chain Discovery"
+    stage = "Day 1 - Discovery, detection and evidence"
 
     @property
     def max_upload_bytes(self) -> int:
@@ -47,6 +47,19 @@ class Settings:
     @property
     def max_stored_analyses(self) -> int:
         return _int("SSC_MAX_STORED_ANALYSES", 200)
+
+    @property
+    def vuln_scan_enabled(self) -> bool:
+        """Known-vulnerability lookup against OSV.dev (sends package names + versions, nothing else)."""
+        return os.environ.get("SSC_VULN_SCAN", "true").lower() in {"1", "true", "yes"}
+
+    @property
+    def osv_url(self) -> str:
+        return os.environ.get("SSC_OSV_URL", "https://api.osv.dev")
+
+    @property
+    def vuln_timeout_seconds(self) -> int:
+        return _int("SSC_VULN_TIMEOUT_SECONDS", 45)
 
     @property
     def syft_enabled(self) -> bool:

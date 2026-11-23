@@ -52,6 +52,9 @@ def build_purl(ecosystem: str, name: str, version: Optional[str] = None,
         if ecosystem == "maven":
             group, _, artifact = name.partition(":")
             return str(PackageURL(type="maven", namespace=group or None, name=artifact or group, version=version))
+        if ecosystem == "github-actions":
+            owner, _, repo = name.partition("/")
+            return str(PackageURL(type="github", namespace=owner or None, name=repo or owner, version=version))
         if ecosystem == "docker":
             return str(PackageURL(type="docker", namespace=namespace, name=name, version=version,
                                   qualifiers=qualifiers or None))

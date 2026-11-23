@@ -12,7 +12,12 @@ import shutil
 import subprocess
 from typing import Any, Optional
 
-from cyclonedx.model import Property
+from decimal import Decimal
+
+from cyclonedx.model import Property, XsUri
+from cyclonedx.model.vulnerability import (
+    BomTarget, Vulnerability, VulnerabilityRating, VulnerabilityScoreSource, VulnerabilitySeverity, VulnerabilitySource,
+)
 from cyclonedx.model.bom import Bom
 from cyclonedx.model.bom_ref import BomRef
 from cyclonedx.model.component import Component as CdxComponent, ComponentType
@@ -84,6 +89,26 @@ def generate_cyclonedx(result: DiscoveryResult) -> tuple[dict[str, Any], list[st
     for cid, comp in refs.items():
         kids = [refs[k] for k in dict.fromkeys(children.get(cid, []))]
         bom.register_dependency(comp, kids)
+
+    for n, f in enumerate(f for f in result.findings if f.category == "vulnerability" and f.component_id in refs):
+        vid = next((i for i in f.vulnerability_ids if i.startswith("CVE-")), None) or (f.vulnerability_ids or [f.id])[0]
+        method = None
+        if f.cvss_vector and f.cvss_vector.startswith("CVSS:3.1"):
+            method = VulnerabilityScoreSource.CVSS_V3_1
+        elif f.cvss_vector and f.cvss_vector.startswith("CVSS:3"):
+            method = VulnerabilityScoreSource.CVSS_V3
+        elif f.cvss_vector and f.cvss_vector.startswith("CVSS:4"):
+            method = VulnerabilityScoreSource.CVSS_V4
+        bom.vulnerabilities.add(Vulnerability(
+            bom_ref=f"vuln-{n + 1}", id=vid, source=VulnerabilitySource(name="OSV", url=XsUri("https://osv.dev")),
+            description=f.title[:500],
+            ratings=[VulnerabilityRating(
+                severity=VulnerabilitySeverity(f.severity),
+                score=Decimal(str(f.cvss_score)) if f.cvss_score is not None else None,
+                method=method, vector=f.cvss_vector)],
+            recommendation=f"Upgrade {f.component_name} to {f.fixed_versions[0]} or later." if f.fixed_versions else None,
+            affects=[BomTarget(ref=f.component_id)],
+        ))
 
     doc = json.loads(JsonV1Dot6(bom).output_as_string())
     return doc, notes

@@ -10,10 +10,12 @@ from backend.analyzers.docker_analyzer import DockerAnalyzer
 from backend.analyzers.java_analyzer import JavaAnalyzer
 from backend.analyzers.javascript_analyzer import JavaScriptAnalyzer
 from backend.analyzers.python_analyzer import PythonAnalyzer
+from backend.analyzers.workflow_analyzer import WorkflowAnalyzer
+from backend.config import settings
 from backend.models import (
     DiscoveryResult, DiscoverySummary, SourceFileInfo, SupportLevel,
 )
-from backend.services import sbom_service
+from backend.services import risk_service, sbom_service, vulnerability_service
 from backend.services.dependency_resolver import attach_root, merge_parts, transitive_resolution_level
 from backend.utils.file_utils import (
     FORMAT_REGISTRY, FileValidationError, classify_file, decode_text, safe_basename,
@@ -48,12 +50,17 @@ def discover(
     for path, data in raw_files.items():
         texts[path] = decode_text(data, path) if isinstance(data, bytes) else data
 
-    groups: dict[str, dict[str, str]] = {"py": {}, "js": {}, "java": {}, "docker": {}}
+    groups: dict[str, dict[str, str]] = {"py": {}, "js": {}, "java": {}, "docker": {}, "ci": {}}
     sboms: dict[str, tuple[str, str]] = {}
     unsupported: list[str] = []
+    formats: dict[str, str] = {}
     for path, text in texts.items():
         fmt = classify_file(path, text[:2000])
-        if fmt in PY_FORMATS:
+        if fmt:
+            formats[path] = fmt
+        if fmt == "github-workflow":
+            groups["ci"][path] = text
+        elif fmt in PY_FORMATS:
             groups["py"][path] = text
         elif fmt in JS_FORMATS:
             groups["js"][path] = text
@@ -70,7 +77,8 @@ def discover(
         names = ", ".join(f"'{p}'" for p in unsupported[:5])
         raise FileValidationError(
             f"Unsupported file type: {names}. Supported: requirements.txt, pyproject.toml, poetry.lock, uv.lock, package.json, "
-            "package-lock.json, pom.xml, Dockerfile, CycloneDX JSON, SPDX JSON (yarn.lock and pnpm-lock.yaml are recognised but "
+            "package-lock.json, pom.xml, Dockerfile, GitHub Actions workflow (.yml), CycloneDX JSON, SPDX JSON "
+            "(yarn.lock and pnpm-lock.yaml are recognised but "
             "not yet supported).", 415)
 
     parts: list[AnalysisPart] = []
@@ -82,6 +90,8 @@ def discover(
         parts.append(_run(JavaAnalyzer(), groups["java"]))
     if groups["docker"]:
         parts.append(_run(DockerAnalyzer(), groups["docker"]))
+    if groups["ci"]:
+        parts.append(_run(WorkflowAnalyzer(), groups["ci"]))
     for path, (fmt, text) in sboms.items():
         try:
             _fmt, part = sbom_service.parse_sbom_json(text, path)
@@ -122,7 +132,8 @@ def discover(
     if not components and not any(p.docker for p in parts):
         limitations.append("No dependency information could be extracted from the supplied inputs.")
 
-    eco_counts = Counter(c.ecosystem for c in components if c.ecosystem != "docker") or Counter(c.ecosystem for c in components)
+    eco_counts = (Counter(c.ecosystem for c in components if c.ecosystem not in {"docker", "github-actions"})
+                  or Counter(c.ecosystem for c in components))
     summary = DiscoverySummary(
         project_name=project_name,
         primary_ecosystem=eco_counts.most_common(1)[0][0] if eco_counts else None,
@@ -141,11 +152,30 @@ def discover(
         relationships=relationships, docker=[d for p in parts for d in p.docker],
         limitations=limitations, warnings=warnings,
     )
+    detect_risks(result, texts, formats)
     sbom_doc, status, notes = sbom_service.build_sbom(result)
     result.sbom_status = status
     result.summary.sbom_status = status
     result.warnings += notes
     return result, sbom_doc
+
+
+def detect_risks(result: DiscoveryResult, texts: dict[str, str], formats: dict[str, str]) -> None:
+    """Day-1 detection: suspicious supply-chain signals + known vulnerabilities (OSV.dev), in place."""
+    findings = risk_service.detect_suspicious(result, texts, formats)
+    if not result.components:
+        risk_service.finalize(result, findings, "not run (no components)", 0, 0)
+        return
+    if not settings.vuln_scan_enabled:
+        risk_service.finalize(result, findings, "disabled (SSC_VULN_SCAN=false)", 0, len(result.components))
+        return
+    outcome = vulnerability_service.scan(result.components)
+    result.warnings += outcome.warnings
+    if outcome.not_checked:
+        result.limitations.append(
+            f"Vulnerabilities: {outcome.not_checked} component(s) were not checked because their version is unresolved "
+            "or their ecosystem (e.g. Docker images) has no package advisory database here.")
+    risk_service.finalize(result, findings + outcome.findings, outcome.status, outcome.checked, outcome.not_checked)
 
 
 def discover_uploads(uploads: dict[str, bytes]) -> tuple[DiscoveryResult, Optional[dict[str, Any]]]:

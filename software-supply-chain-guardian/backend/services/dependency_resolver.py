@@ -81,7 +81,8 @@ def transitive_resolution_level(components: list[Component], files: list[SourceF
     resolved relationship data (lockfile / SBOM). A single manifest-only project
     in a monorepo downgrades the result to "partial".
     """
-    libs = [c for c in components if c.ecosystem != "docker" and c.component_type == "library"]
+    # CI actions have no lockfile-style tree; they must not downgrade a project's resolution level.
+    libs = [c for c in components if c.ecosystem not in {"docker", "github-actions"} and c.component_type == "library"]
     if not libs:
         return "none"
     resolving = {f.path for f in files if f.provides_transitive}

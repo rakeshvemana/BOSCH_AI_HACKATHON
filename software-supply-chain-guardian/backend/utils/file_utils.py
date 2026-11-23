@@ -35,13 +35,16 @@ FORMAT_REGISTRY: dict[str, tuple[SupportLevel, str]] = {
     "cyclonedx": (SupportLevel.FULL, "CycloneDX JSON import: components and dependency graph as provided."),
     "spdx": (SupportLevel.PARTIAL, "SPDX 2.x JSON import: packages and DEPENDS_ON relationships."),
     "Dockerfile": (SupportLevel.PARTIAL, "Static metadata only: base images, installs, copied files. Not a list of installed OS packages."),
+    "github-workflow": (SupportLevel.PARTIAL, "GitHub Actions workflow: the actions, reusable workflows and container images CI/CD jobs use (static read; nothing is run)."),
 }
 
 ECOSYSTEM_OF_FORMAT = {
     "requirements.txt": "pypi", "pyproject.toml": "pypi", "poetry.lock": "pypi", "uv.lock": "pypi",
     "package.json": "npm", "package-lock.json": "npm", "yarn.lock": "npm", "pnpm-lock.yaml": "npm",
-    "pom.xml": "maven", "Dockerfile": "docker",
+    "pom.xml": "maven", "Dockerfile": "docker", "github-workflow": "github-actions",
 }
+
+_WORKFLOW_DIR_RE = re.compile(r"(^|/)\.github/workflows/[^/]+\.ya?ml$", re.IGNORECASE)
 
 _SKIP_DIRS = {
     "node_modules", "vendor", "third_party", "venv", ".venv", "env", "site-packages",
@@ -90,6 +93,13 @@ def classify_file(path: str, content_head: Optional[str] = None) -> Optional[str
         return exact[low]
     if low == "dockerfile" or low.startswith("dockerfile.") or low.endswith(".dockerfile"):
         return "Dockerfile"
+    if low.endswith((".yml", ".yaml")):
+        if _WORKFLOW_DIR_RE.search(path):
+            return "github-workflow"
+        # An uploaded workflow arrives without its directory: recognise it by content.
+        head = content_head or ""
+        if re.search(r"(?m)^jobs\s*:", head) and re.search(r"(?m)^\s+(runs-on|uses)\s*:", head):
+            return "github-workflow"
     if low.endswith(".json"):
         head = content_head or ""
         if '"bomFormat"' in head and "CycloneDX" in head:

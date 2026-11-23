@@ -12,7 +12,7 @@ Beginner notes
 from __future__ import annotations
 
 from collections import deque
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 import networkx as nx
 
@@ -75,18 +75,53 @@ def dependencies_of(graph: dict[str, Any], node_id: str) -> list[str]:
     return sorted({e["target"] for e in graph["edges"] if e["source"] == node_id})
 
 
+class PathFinder:
+    """Shortest dependency paths root -> component, for many lookups on one graph.
+
+    One BFS from the root gives every node's depth. A node's "shortest-path parents" are the
+    parents exactly one level closer to the root; walking those back always ends at the root,
+    so enumerating paths never explores a dead end: O(limit x depth) per lookup, after an
+    O(nodes + edges) setup. (``nx.all_simple_paths`` can explore exponentially many branches
+    in dense npm graphs before it finds a few paths.)
+    """
+
+    def __init__(self, edges: Iterable[tuple[str, str]], root: str = ROOT_ID) -> None:
+        children: dict[str, list[str]] = {}
+        parents: dict[str, list[str]] = {}
+        for s, t in edges:
+            children.setdefault(s, []).append(t)
+            parents.setdefault(t, []).append(s)
+        self.root = root
+        self.depth: dict[str, int] = {root: 0}
+        dq = deque([root])
+        while dq:
+            n = dq.popleft()
+            for k in children.get(n, []):
+                if k not in self.depth:
+                    self.depth[k] = self.depth[n] + 1
+                    dq.append(k)
+        self._up = {n: sorted({p for p in ps if self.depth.get(p, -2) == self.depth.get(n, -1) - 1})
+                    for n, ps in parents.items()}
+
+    def paths(self, target: str, limit: int = 3) -> list[list[str]]:
+        if target not in self.depth:
+            return []
+        out: list[list[str]] = []
+        stack = [(target, [target])]
+        while stack and len(out) < limit:
+            node, acc = stack.pop()
+            if node == self.root:
+                out.append(acc[::-1])
+                continue
+            for p in reversed(self._up.get(node, [])):
+                stack.append((p, acc + [p]))
+        return out
+
+
 def paths_from_root(graph: dict[str, Any], node_id: str, limit: int = 5, max_len: int = 12) -> list[list[str]]:
-    """Up to ``limit`` simple paths root -> node (shows multiple dependency paths)."""
-    dg = nx.DiGraph()
-    dg.add_edges_from((e["source"], e["target"]) for e in graph["edges"])
-    if ROOT_ID not in dg or node_id not in dg:
-        return []
-    out = []
-    for p in nx.all_simple_paths(dg, ROOT_ID, node_id, cutoff=max_len):
-        out.append(p)
-        if len(out) >= limit:
-            break
-    return out
+    """Up to ``limit`` SHORTEST paths root -> node (several when it is reached through several parents)."""
+    paths = PathFinder((e["source"], e["target"]) for e in graph["edges"]).paths(node_id, limit)
+    return [p for p in paths if len(p) - 1 <= max_len]
 
 
 def subgraph_around(graph: dict[str, Any], node_id: str, depth: int = 3) -> dict[str, Any]:
@@ -168,8 +203,15 @@ def _short(name: str, n: int = 26) -> str:
     return name if len(name) <= n else name[: n - 1] + "…"
 
 
-def build_figure(graph: dict[str, Any], highlight: Optional[str] = None):
-    """Return a Plotly figure for a graph JSON dict (as returned by the API)."""
+_RISK_RING = {"critical": "#7f1d1d", "high": "#dc2626", "medium": "#f97316", "low": "#eab308"}
+
+
+def build_figure(graph: dict[str, Any], highlight: Optional[str] = None, flags: Optional[dict[str, str]] = None):
+    """Return a Plotly figure for a graph JSON dict (as returned by the API).
+
+    ``flags`` maps node id -> highest risk level of its findings; those nodes get a coloured ring.
+    """
+    flags = {k: v for k, v in (flags or {}).items() if v in _RISK_RING}
     import plotly.graph_objects as go
 
     pos = _layout(graph)
@@ -197,7 +239,7 @@ def build_figure(graph: dict[str, Any], highlight: Optional[str] = None):
                           hoverinfo="none", showlegend=False)
 
     touching = [e for e in graph["edges"] if highlight in (e["source"], e["target"])] if highlight else []
-    other = [e for e in graph["edges"] if e not in touching]
+    other = [e for e in graph["edges"] if not highlight or highlight not in (e["source"], e["target"])]
     fig = go.Figure(edge_trace(other, "rgba(156,163,175,0.3)" if highlight else "rgba(156,163,175,0.55)", 0.8))
     if touching:
         fig.add_trace(edge_trace(touching, "#ef4444", 2))
@@ -211,19 +253,25 @@ def build_figure(graph: dict[str, Any], highlight: Optional[str] = None):
         fig.add_trace(go.Scatter(
             x=[pos[n["id"]][0] for n in nodes], y=[pos[n["id"]][1] for n in nodes], mode="markers+text",
             name=dtype.capitalize(), textposition="middle right",
-            text=[f" {_short(n['name'])}" + (f" <span style='color:#9ca3af'>{n['version']}</span>" if n["version"] else "")
+            text=[f" {'⚠ ' if n['id'] in flags else ''}{_short(n['name'])}"
+                  # commit SHAs / digests are 40+ chars and would run into the next column
+                  + (f" <span style='color:#9ca3af'>{_short(n['version'], 14)}</span>" if n["version"] else "")
                   for n in nodes],
-            textfont=dict(size=11, color=["#111827" if lit(n) else "#d1d5db" for n in nodes]),
+            textfont=dict(size=11, color=[("#b91c1c" if n["id"] in flags else "#111827") if lit(n) else "#d1d5db"
+                                          for n in nodes]),
             marker=dict(
-                size=[16 if n["id"] == highlight else 10 for n in nodes], color=_COLORS.get(dtype, "#6b7280"),
+                size=[16 if n["id"] == highlight else (13 if n["id"] in flags else 10) for n in nodes],
+                color=_COLORS.get(dtype, "#6b7280"),
                 opacity=[1.0 if lit(n) else 0.3 for n in nodes],
-                line=dict(width=[3 if n["id"] == highlight else 1 for n in nodes],
-                          color=["#ef4444" if n["id"] == highlight else "#ffffff" for n in nodes]),
+                line=dict(width=[3 if n["id"] == highlight or n["id"] in flags else 1 for n in nodes],
+                          color=["#ef4444" if n["id"] == highlight else _RISK_RING.get(flags.get(n["id"], ""), "#ffffff")
+                                 for n in nodes]),
                 symbol=["diamond" if n.get("in_cycle") else "circle" for n in nodes],
             ),
             customdata=[n["id"] for n in nodes],
             hovertext=[f"<b>{n['name']}</b><br>Version: {n['version'] or 'unresolved'} ({n['version_status']})<br>"
-                       f"Type: {n['dependency_type']}<br>Ecosystem: {n['ecosystem']}<br>Depth: {n.get('depth')}" for n in nodes],
+                       f"Type: {n['dependency_type']}<br>Ecosystem: {n['ecosystem']}<br>Depth: {n.get('depth')}"
+                       + (f"<br><b>Highest risk: {flags[n['id']]}</b>" if n["id"] in flags else "") for n in nodes],
             hoverinfo="text",
         ))
     half = (tallest - 1) / 2

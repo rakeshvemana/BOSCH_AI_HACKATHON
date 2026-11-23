@@ -58,9 +58,15 @@ def test_streamlit_app_renders_results_end_to_end(api, monkeypatch):
     assert not at.exception, [e.value for e in at.exception]
     headers = [h.value for h in at.header]
     assert any(h.startswith("A") for h in headers) and any(h.startswith("F") for h in headers)
+    assert {"C · What appears risky", "D · What changed", "H · Export"} <= set(headers)
     metrics = {m.label: m.value for m in at.metric}
     assert metrics["Total components"] == "3" and metrics["Direct"] == "3"
+    assert metrics["What changed"] == "first scan"
     assert not at.error
+    # second scan of the same repo: 'what changed' now compares against the first
+    at.button[0].click().run()
+    assert not at.exception
+    assert {m.label: m.value for m in at.metric}["What changed"] == "0 change(s)"
 
 
 def test_streamlit_app_shows_friendly_error_for_bad_url(api, monkeypatch):

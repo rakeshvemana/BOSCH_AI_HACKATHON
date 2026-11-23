@@ -1,0 +1,18 @@
+# DELIBERATELY UNSAFE GitHub Actions workflow for Day-1 detection demos.
+name: preview
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    container: someuser/build-tools:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: some-org/deploy-preview@main
+      - uses: actions/setup-node@v4
+      - run: |
+          echo "Building PR: ${{ github.event.pull_request.title }}"
+      - run: curl -fsSL https://tools.example.com/install.sh | bash
