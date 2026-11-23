@@ -211,6 +211,34 @@ class DiscoveryResult(BaseModel):
     changes: Optional[ChangeReport] = None
 
 
+# ---------------------------------------------------------------- agent models
+class TriageItem(BaseModel):
+    """The agent's opinion on ONE finding. The finding itself is never modified."""
+    finding_id: str
+    verdict: Literal["real-risk", "likely-noise", "needs-review"]
+    original_risk: Severity
+    adjusted_risk: Severity
+    reasoning: str
+    fix: str = ""
+
+
+class AgentStep(BaseModel):
+    """One tool call the agent made (shown to the user so the reasoning can be audited)."""
+    tool: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    result_preview: str = ""
+
+
+class TriageReport(BaseModel):
+    analysis_id: str
+    model: str
+    summary: str
+    items: list[TriageItem] = Field(default_factory=list)
+    steps: list[AgentStep] = Field(default_factory=list)
+    findings_total: int = 0
+    findings_considered: int = 0
+
+
 # ---------------------------------------------------------------- API models
 class RepositoryRequest(BaseModel):
     url: str = Field(min_length=1, max_length=300, examples=["https://github.com/pallets/click"])

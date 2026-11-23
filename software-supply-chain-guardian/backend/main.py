@@ -15,8 +15,9 @@ from fastapi.responses import JSONResponse
 from backend.config import settings
 from backend.models import (
     AppInfo, DiscoveryResult, Finding, GraphResponse, HealthResponse, ImageRequest, RepositoryRequest,
+    TriageReport,
 )
-from backend.services import discovery_service, risk_service, sbom_service
+from backend.services import agent_service, discovery_service, risk_service, sbom_service
 from backend.services.graph_service import graph_response
 from backend.services.repository_service import RepositoryService
 from backend.services.storage_service import AnalysisStore
@@ -25,12 +26,14 @@ from backend.utils.file_utils import FileValidationError
 log = logging.getLogger("ssc-guardian")
 
 
-def create_app(store: Optional[AnalysisStore] = None, repo_service: Optional[RepositoryService] = None) -> FastAPI:
+def create_app(store: Optional[AnalysisStore] = None, repo_service: Optional[RepositoryService] = None,
+               llm: Optional[agent_service.LLM] = None) -> FastAPI:
     app = FastAPI(title=settings.app_name, version=settings.app_version,
                   description="Day 1: discover the software supply chain (dependencies, graph, SBOM), detect known "
                               "vulnerabilities and suspicious changes, and present the evidence.")
     app.state.store = store or AnalysisStore()
     app.state.repo_service = repo_service or RepositoryService()
+    app.state.llm = llm  # tests inject a fake; otherwise a DeepSeek client is built per request from the environment
 
     # ------------------------------------------------------------ error handling
     @app.exception_handler(FileValidationError)
@@ -118,6 +121,24 @@ def create_app(store: Optional[AnalysisStore] = None, repo_service: Optional[Rep
     def get_findings(analysis_id: str):
         """Vulnerabilities and suspicious signals, highest initial risk first, each with its evidence."""
         return _load(analysis_id).findings
+
+    @app.post("/api/discovery/{analysis_id}/triage", response_model=TriageReport)
+    async def triage(analysis_id: str):
+        """AI triage: an agent investigates the findings with read-only tools and gives a verdict on each.
+
+        Sends package names/versions, finding titles and file paths to the configured LLM (DeepSeek).
+        """
+        result = _load(analysis_id)
+        llm_fn, model = app.state.llm, "injected"
+        if llm_fn is None:
+            if not settings.deepseek_api_key:
+                raise HTTPException(503, "AI triage is not configured: set DEEPSEEK_API_KEY in the backend's environment.")
+            llm_fn = agent_service.DeepSeekClient()
+            model = llm_fn.model
+        try:
+            return await run_in_threadpool(agent_service.run_triage, result, llm_fn, model)
+        except agent_service.LLMError as exc:
+            raise HTTPException(502, str(exc))
 
     @app.get("/api/discovery/{analysis_id}/graph", response_model=GraphResponse)
     def get_graph(analysis_id: str):

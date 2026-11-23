@@ -50,6 +50,9 @@ class GuardianClient:
     def get_graph(self, analysis_id: str) -> dict:
         return self._request("GET", f"/api/discovery/{analysis_id}/graph")
 
+    def triage(self, analysis_id: str) -> dict:
+        return self._request("POST", f"/api/discovery/{analysis_id}/triage")
+
     def get_sbom(self, analysis_id: str) -> Optional[dict]:
         try:
             return self._request("GET", f"/api/discovery/{analysis_id}/sbom")

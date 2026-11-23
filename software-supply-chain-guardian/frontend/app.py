@@ -248,7 +248,8 @@ with right:
         shown_f = [f for f in findings
                    if (not want_risk or f["risk"] in want_risk) and (not want_rule or f["rule"] in want_rule)
                    and (not fq or fq.lower() in " ".join([f["title"], f.get("component_name") or "", *f["vulnerability_ids"]]).lower())]
-        tab_charts, tab_findings, tab_evidence = st.tabs(["Charts", f"Findings ({len(shown_f)})", "Evidence"])
+        tab_charts, tab_findings, tab_evidence, tab_ai = st.tabs(
+            ["Charts", f"Findings ({len(shown_f)})", "Evidence", "🤖 AI triage"])
         with tab_charts:
             ch1, ch2 = st.columns([1.6, 1])
             with ch1:
@@ -303,6 +304,42 @@ with right:
             if len(shown_f) > limit:
                 st.caption(f"Evidence shown for the first {limit}; narrow the filters or download the findings report (section H).")
 
+
+        with tab_ai:
+            st.markdown("An AI agent investigates the highest-risk findings with read-only tools (dependency paths, "
+                        "scope, evidence, changes) and gives a verdict on each. **The scanner's findings are never changed** — "
+                        "this is a second opinion shown beside them.")
+            st.caption("Sends package names/versions, finding titles and file paths to the DeepSeek API.")
+            key = f"triage_{result['analysis_id']}"
+            if st.button("Run AI triage", type="primary", key="run_triage"):
+                try:
+                    with st.spinner("Agent is investigating the findings…"):
+                        st.session_state[key] = client.triage(result["analysis_id"])
+                except ApiError as exc:
+                    st.error(f"❌ {exc}")
+            tri = st.session_state.get(key)
+            if tri:
+                st.info(tri["summary"] or "No summary returned.")
+                st.caption(f"Model: {tri['model']} · {tri['findings_considered']} of {tri['findings_total']} findings reviewed "
+                           f"(highest risk first) · {len(tri['steps'])} tool call(s)")
+                by_f = {f["id"]: f for f in findings}
+                VERDICT = {"real-risk": ("Real risk", "#b91c1c"), "likely-noise": ("Likely noise", "#6b7280"),
+                           "needs-review": ("Needs review", "#d97706")}
+                rows = []
+                for it in tri["items"]:
+                    f = by_f.get(it["finding_id"], {})
+                    label, color = VERDICT[it["verdict"]]
+                    rows.append(
+                        f"<tr><td><b>{escape(f.get('component_name') or '—')}</b><br><small>{escape(f.get('title', '')[:80])}</small></td>"
+                        f"<td><span class='ssc-pill' style='background:{color};color:#fff'>{label}</span></td>"
+                        f"<td>{dash.pill(it['original_risk'])} → {dash.pill(it['adjusted_risk'])}</td>"
+                        f"<td>{escape(it['reasoning'])}</td><td>{escape(it['fix'])}</td></tr>")
+                st.markdown("<div class='ssc-card' style='padding:6px 10px'><table class='ssc-table'><tr><th>Finding</th><th>Verdict</th>"
+                            "<th>Risk</th><th>Reasoning</th><th>Suggested fix</th></tr>" + "".join(rows) + "</table></div>",
+                            unsafe_allow_html=True)
+                with st.expander(f"How the agent got there ({len(tri['steps'])} tool calls)"):
+                    for s_ in tri["steps"]:
+                        st.markdown(f"- `{s_['tool']}({json.dumps(s_['arguments'])})` → {escape(s_['result_preview'][:200])}")
 
 # ----------------------------------------------------------------- Section D
 st.header("D · What changed")

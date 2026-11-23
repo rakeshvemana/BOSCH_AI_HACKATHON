@@ -65,5 +65,30 @@ class Settings:
     def syft_enabled(self) -> bool:
         return os.environ.get("SSC_ENABLE_SYFT", "false").lower() in {"1", "true", "yes"}
 
+    # ---- Agent (LLM) settings. The key is read from the environment only; it is never stored or logged.
+    @property
+    def deepseek_api_key(self) -> str:
+        return os.environ.get("DEEPSEEK_API_KEY", "").strip()
+
+    @property
+    def deepseek_base_url(self) -> str:
+        return os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
+
+    @property
+    def deepseek_model(self) -> str:
+        return os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+
+    @property
+    def agent_max_steps(self) -> int:
+        return _int("SSC_AGENT_MAX_STEPS", 8)
+
+    @property
+    def agent_max_findings(self) -> int:
+        return _int("SSC_AGENT_MAX_FINDINGS", 25)
+
+    @property
+    def agent_timeout_seconds(self) -> int:
+        return _int("SSC_AGENT_TIMEOUT_SECONDS", 90)
+
 
 settings = Settings()
