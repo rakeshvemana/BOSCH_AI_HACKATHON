@@ -148,6 +148,29 @@ def subgraph_around(graph: dict[str, Any], node_id: str, depth: int = 3) -> dict
     }
 
 
+def _restrict(graph: dict[str, Any], keep: set[str]) -> dict[str, Any]:
+    return {
+        **graph,
+        "nodes": [n for n in graph["nodes"] if n["id"] in keep],
+        "edges": [e for e in graph["edges"] if e["source"] in keep and e["target"] in keep],
+    }
+
+
+def limit_depth(graph: dict[str, Any], max_depth: int) -> dict[str, Any]:
+    """Keep only nodes at most ``max_depth`` steps from the root (unreachable nodes are dropped)."""
+    return _restrict(graph, {n["id"] for n in graph["nodes"] if n.get("depth") is not None and n["depth"] <= max_depth})
+
+
+def overview(graph: dict[str, Any], flagged: Iterable[str], paths_per_node: int = 2) -> dict[str, Any]:
+    """Readable summary: root + direct dependencies + the shortest path(s) down to each flagged component."""
+    keep = {n["id"] for n in graph["nodes"] if n.get("depth") is not None and n["depth"] <= 1}
+    finder = PathFinder((e["source"], e["target"]) for e in graph["edges"])
+    for fid in flagged:
+        for p in finder.paths(fid, paths_per_node):
+            keep.update(p)
+    return _restrict(graph, keep)
+
+
 def _layers(graph: dict[str, Any]) -> dict[int, list[str]]:
     """Group node ids by BFS depth from the root (unreachable nodes go in one extra layer)."""
     ids = [n["id"] for n in graph["nodes"]]

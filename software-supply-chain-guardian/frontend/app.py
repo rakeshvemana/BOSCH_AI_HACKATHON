@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+from html import escape
 from pathlib import Path
 
 import pandas as pd
@@ -17,8 +18,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # so `backend` 
 
 from backend.models import ECOSYSTEM_LABELS  # noqa: E402
 from backend.services.graph_service import (  # noqa: E402
-    TABLE_FALLBACK_NODES, build_figure, dependencies_of, dependents_of, paths_from_root, subgraph_around,
+    TABLE_FALLBACK_NODES, build_figure, dependencies_of, dependents_of, limit_depth, overview, paths_from_root,
+    subgraph_around,
 )
+from frontend import dashboard as dash  # noqa: E402
 from frontend.api_client import ApiError, GuardianClient  # noqa: E402
 
 BACKEND_URL = os.environ.get("SSC_BACKEND_URL", "http://127.0.0.1:8000")
@@ -199,79 +202,107 @@ with st.expander("Analysed files and support level"):
     } for f in result["files"]]), width="stretch", hide_index=True)
 
 # ----------------------------------------------------------------- Section C
+st.markdown(dash.CSS, unsafe_allow_html=True)
 st.header("C · What appears risky")
 st.caption(f"Vulnerability check: {risk.get('vulnerability_scan', 'not run')}. "
            "Suspicious-change rules: typosquatting, install scripts, lockfile tampering/mismatch, non-registry sources, "
            "untrusted images, remote scripts, unpinned CI actions, CI script injection, version downgrades.")
-r_cols = st.columns(5)
-for col, lvl in zip(r_cols, RISK_LEVELS):
-    col.metric(f"{RISK_ICON[lvl]} {lvl.capitalize()}", risk.get("by_risk", {}).get(lvl, 0))
-v1, v2, v3 = st.columns(3)
-v1.metric("Known vulnerabilities", risk.get("vulnerabilities", 0))
-v2.metric("Vulnerable components", risk.get("vulnerable_components", 0))
-v3.metric("Suspicious signals", risk.get("suspicious_signals", 0))
+by_risk = risk.get("by_risk", {})
+score = dash.risk_score(by_risk)
+band, band_color = dash.score_band(score)
+checked, unchecked = risk.get("components_checked", 0), risk.get("components_not_checked", 0)
+coverage = round(100 * checked / (checked + unchecked)) if (checked + unchecked) else 0
 
-if not findings:
-    st.success("No known vulnerabilities or suspicious supply-chain signals were found in what could be checked.")
-else:
-    g1, g2, g3 = st.columns([2, 2, 3])
-    want_risk = g1.multiselect("Risk level", RISK_LEVELS, default=[r for r in RISK_LEVELS if r != "info"])
-    rules = sorted({f["rule"] for f in findings})
-    want_rule = g2.multiselect("Detected by", rules, format_func=lambda r: RULE_LABEL.get(r, r))
-    fq = g3.text_input("Search findings", placeholder="CVE id, package, keyword…")
-    shown_f = [f for f in findings
-               if (not want_risk or f["risk"] in want_risk) and (not want_rule or f["rule"] in want_rule)
-               and (not fq or fq.lower() in " ".join([f["title"], f.get("component_name") or "", *f["vulnerability_ids"]]).lower())]
-    st.dataframe(pd.DataFrame([{
-        "Risk": f"{RISK_ICON[f['risk']]} {f['risk']}",
-        "Severity": f["severity"],
-        "Detected by": RULE_LABEL.get(f["rule"], f["rule"]),
-        "Finding": f["title"],
-        "Component": f.get("component_name") or "—",
-        "Version": f.get("component_version") or "",
-        "Type": f.get("dependency_type") or "",
-        "Fix": ", ".join(f["fixed_versions"]) or ("none published" if f["category"] == "vulnerability" else ""),
-    } for f in shown_f]), width="stretch", hide_index=True, height=min(460, 60 + 35 * max(len(shown_f), 1)))
-    st.caption(f"Showing {len(shown_f)} of {len(findings)} findings, highest initial risk first. "
-               "Initial risk = severity adjusted for context (dev/test-only scope is lowered one level).")
+left, right = st.columns([1, 2.6], gap="medium")
+with left:
+    st.markdown(dash.card("Project", [
+        ("Name", escape(summary["project_name"])),
+        ("Status", f"<span class='ssc-pill' style='background:{band_color};color:#fff'>{band}</span>"),
+        ("Ecosystems", escape(", ".join(eco_label(e) for e in summary["ecosystems"]) or "—")),
+        ("Components", str(summary["total_components"])),
+        ("Direct / transitive", f"{summary['direct_dependencies']} / {summary['transitive_dependencies']}"),
+        ("Source", escape(str(result["source"]))[:40]),
+    ]), unsafe_allow_html=True)
+    st.markdown(dash.score_card("Vulnerability check coverage", coverage,
+                                f"{checked} of {checked + unchecked} components could be checked"), unsafe_allow_html=True)
+    st.markdown(dash.card("Findings by risk", [
+        (lvl.capitalize(), f"{dash.pill(lvl)} &nbsp;{by_risk.get(lvl, 0)}") for lvl in RISK_LEVELS
+    ] + [("Known vulnerabilities", str(risk.get("vulnerabilities", 0))),
+         ("Suspicious signals", str(risk.get("suspicious_signals", 0)))]), unsafe_allow_html=True)
+    log = (changes or {}).get("changes", [])[:5]
+    st.markdown("<div class='ssc-card'><h4>Changes log</h4>" + ("".join(
+        f"<div class='ssc-log'><b>{escape(c['name'])}</b> {escape(c['change'])}"
+        f"<small>{escape(', '.join(c['old_versions']) or '—')} → {escape(', '.join(c['new_versions']) or '—')}</small></div>"
+        for c in log) if log else "<div class='ssc-log'>No previous analysis to compare with.</div>") + "</div>",
+        unsafe_allow_html=True)
 
-    st.subheader("Evidence")
-    limit = 40
-    for f in shown_f[:limit]:
-        label = f"{RISK_ICON[f['risk']]} {f['risk'].upper()} · {f['title']}"
-        with st.expander(label[:180]):
-            if f.get("description"):
-                # advisory text is Markdown with its own headings; keep them from dwarfing the panel
-                st.markdown(re.sub(r"(?m)^#{1,6}\s*(.+)$", r"**\1**", f["description"]))
-            e1, e2 = st.columns(2)
-            with e1:
-                lines = [f"- **What was detected:** {RULE_LABEL.get(f['rule'], f['rule'])}"]
-                if f.get("component_name"):
-                    lines.append(f"- **Affected component:** `{f['component_name']}` {f.get('component_version') or ''} "
-                                 f"({f.get('dependency_type') or 'n/a'}, {eco_label(f.get('ecosystem'))})")
-                lines.append(f"- **Severity:** {f['severity']}" + (f" · CVSS {f['cvss_score']}" if f.get("cvss_score") is not None else ""))
-                lines.append(f"- **Initial risk:** {f['risk']} — {f['risk_rationale']}")
-                if f["vulnerability_ids"]:
-                    lines.append("- **Advisories:** " + ", ".join(f["vulnerability_ids"]))
-                if f["fixed_versions"]:
-                    lines.append(f"- **Fixed in:** {', '.join(f['fixed_versions'])}")
-                elif f["category"] == "vulnerability":
-                    lines.append("- **Fixed in:** no fixed version published yet")
-                st.markdown("\n".join(lines))
-                if f.get("cvss_vector"):
-                    st.caption(f"CVSS vector: `{f['cvss_vector']}`")
-            with e2:
-                if f["paths"]:
-                    st.markdown("**Dependency path** (how it gets into the application):")
-                    for p in f["paths"]:
-                        st.code(" → ".join(p), language=None)
-                st.markdown("**Supporting evidence:**")
-                st.markdown("\n".join(
-                    f"- `{e['source']}{':' + str(e['line']) if e.get('line') else ''}` — {e['detail']}" for e in f["evidence"]))
-                if f["references"]:
-                    st.markdown("**References:** " + " · ".join(f"[{i + 1}]({u})" for i, u in enumerate(f["references"][:5])))
-    if len(shown_f) > limit:
-        st.caption(f"Evidence shown for the first {limit}; narrow the filters or download the findings report (section H).")
+with right:
+    if not findings:
+        st.success("No known vulnerabilities or suspicious supply-chain signals were found in what could be checked.")
+    else:
+        g1, g2, g3 = st.columns([2, 2, 3])
+        want_risk = g1.multiselect("Risk level", RISK_LEVELS, default=[r for r in RISK_LEVELS if r != "info"])
+        rules = sorted({f["rule"] for f in findings})
+        want_rule = g2.multiselect("Detected by", rules, format_func=lambda r: RULE_LABEL.get(r, r))
+        fq = g3.text_input("Search findings", placeholder="CVE id, package, keyword…")
+        shown_f = [f for f in findings
+                   if (not want_risk or f["risk"] in want_risk) and (not want_rule or f["rule"] in want_rule)
+                   and (not fq or fq.lower() in " ".join([f["title"], f.get("component_name") or "", *f["vulnerability_ids"]]).lower())]
+        tab_charts, tab_findings, tab_evidence = st.tabs(["Charts", f"Findings ({len(shown_f)})", "Evidence"])
+        with tab_charts:
+            ch1, ch2 = st.columns([1.6, 1])
+            with ch1:
+                st.markdown("**Findings by layer**")
+                st.plotly_chart(dash.layer_chart(shown_f), width="stretch")
+            with ch2:
+                st.markdown("**Overall risk score**")
+                st.plotly_chart(dash.gauge(score), width="stretch")
+            st.markdown("**What detected them**")
+            st.plotly_chart(dash.rule_chart(shown_f, RULE_LABEL), width="stretch")
+            st.caption("Score = weighted count of findings (critical 25, high 10, medium 4, low 1), capped at 100. "
+                       "A rough heuristic for comparing scans, not a calibrated probability.")
+        with tab_findings:
+            st.markdown(dash.findings_table(shown_f, RULE_LABEL), unsafe_allow_html=True)
+            st.caption(f"Showing {min(len(shown_f), 60)} of {len(findings)} findings, highest initial risk first. "
+                       "Initial risk = severity adjusted for context (dev/test-only scope is lowered one level).")
+        with tab_evidence:
+            limit = 40
+            for f in shown_f[:limit]:
+                label = f"{RISK_ICON[f['risk']]} {f['risk'].upper()} · {f['title']}"
+                with st.expander(label[:180]):
+                    if f.get("description"):
+                        # advisory text is Markdown with its own headings; keep them from dwarfing the panel
+                        st.markdown(re.sub(r"(?m)^#{1,6}\s*(.+)$", r"**\1**", f["description"]))
+                    e1, e2 = st.columns(2)
+                    with e1:
+                        lines = [f"- **What was detected:** {RULE_LABEL.get(f['rule'], f['rule'])}"]
+                        if f.get("component_name"):
+                            lines.append(f"- **Affected component:** `{f['component_name']}` {f.get('component_version') or ''} "
+                                         f"({f.get('dependency_type') or 'n/a'}, {eco_label(f.get('ecosystem'))})")
+                        lines.append(f"- **Severity:** {f['severity']}" + (f" · CVSS {f['cvss_score']}" if f.get("cvss_score") is not None else ""))
+                        lines.append(f"- **Initial risk:** {f['risk']} — {f['risk_rationale']}")
+                        if f["vulnerability_ids"]:
+                            lines.append("- **Advisories:** " + ", ".join(f["vulnerability_ids"]))
+                        if f["fixed_versions"]:
+                            lines.append(f"- **Fixed in:** {', '.join(f['fixed_versions'])}")
+                        elif f["category"] == "vulnerability":
+                            lines.append("- **Fixed in:** no fixed version published yet")
+                        st.markdown("\n".join(lines))
+                        if f.get("cvss_vector"):
+                            st.caption(f"CVSS vector: `{f['cvss_vector']}`")
+                    with e2:
+                        if f["paths"]:
+                            st.markdown("**Dependency path** (how it gets into the application):")
+                            for p in f["paths"]:
+                                st.code(" → ".join(p), language=None)
+                        st.markdown("**Supporting evidence:**")
+                        st.markdown("\n".join(
+                            f"- `{e['source']}{':' + str(e['line']) if e.get('line') else ''}` — {e['detail']}" for e in f["evidence"]))
+                        if f["references"]:
+                            st.markdown("**References:** " + " · ".join(f"[{i + 1}]({u})" for i, u in enumerate(f["references"][:5])))
+            if len(shown_f) > limit:
+                st.caption(f"Evidence shown for the first {limit}; narrow the filters or download the findings report (section H).")
+
 
 # ----------------------------------------------------------------- Section D
 st.header("D · What changed")
@@ -339,7 +370,23 @@ options = [""] + sorted(names, key=lambda i: names[i]["label"].lower())
 selected = st.selectbox("Inspect a component", options, format_func=lambda i: "— select —" if not i else names[i]["label"])
 focus = st.checkbox("Focus on selected component (show only its dependency subtree and paths from the root)", value=False,
                     disabled=not selected)
-shown = subgraph_around(graph, selected, depth=3) if (focus and selected) else graph
+flags = {cid: r for cid, (r, _n) in worst_risk(result).items()}
+if focus and selected:
+    shown = subgraph_around(graph, selected, depth=3)
+else:
+    big = len(graph["nodes"]) > 40
+    view = st.radio("View", ["Overview (direct + paths to findings)", "Limit by depth", "Full graph"],
+                    index=0 if big else 2, horizontal=True)
+    if view.startswith("Overview"):
+        shown = overview(graph, flags)
+    elif view == "Limit by depth":
+        shown = limit_depth(graph, st.slider("Show up to depth", 1, max(gs["max_depth"], 2), min(2, max(gs["max_depth"], 2))))
+    else:
+        shown = graph
+    hidden = len(graph["nodes"]) - len(shown["nodes"])
+    if hidden > 0:
+        st.caption(f"Showing {len(shown['nodes'])} of {len(graph['nodes'])} components — {hidden} hidden. "
+                   "Switch to 'Full graph' or pick a component and tick Focus to see more.")
 
 if len(shown["nodes"]) > TABLE_FALLBACK_NODES:
     st.warning(f"This graph has {len(shown['nodes'])} nodes — too many for a readable drawing. Showing a table of "
@@ -350,7 +397,6 @@ if len(shown["nodes"]) > TABLE_FALLBACK_NODES:
         "Requirement": e["requirement"] or "", "Inferred": e["inferred"],
     } for e in graph["edges"]]), width="stretch", hide_index=True, height=420)
 else:
-    flags = {cid: r for cid, (r, _n) in worst_risk(result).items()}
     st.plotly_chart(build_figure(shown, highlight=selected or None, flags=flags), width="stretch")
     st.caption("Read left to right: your app → its direct dependencies → what those pull in. "
                "Blue = direct · teal = transitive · amber = unknown classification · diamond = part of a dependency cycle. "
